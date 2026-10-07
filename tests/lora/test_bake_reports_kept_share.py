@@ -38,7 +38,7 @@ def test_bake_reports_the_share_of_the_update_the_weights_hold(dtype, size, low,
 
 @pytest.mark.parametrize(("size", "warned"), [(1e-3, True), (0.1, False)])
 def test_loader_says_how_to_keep_an_update_the_bake_rounds_away(monkeypatch, capsys, size, warned):
-    # The viggle_turbo LoRA for Qwen-Image-2.1 kept 61% of itself baked into bfloat16 (#835).
+    # The viggle_turbo LoRA for Qwen-Image-2.1 kept 66% of itself baked into bfloat16 (#835).
     # _Block arrives with its adapter already in place, so applying the file does nothing here.
     monkeypatch.setattr(LoRALoader, "_apply_single_lora", staticmethod(lambda *args, **kwargs: None))
     monkeypatch.setattr(

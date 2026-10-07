@@ -60,7 +60,7 @@ class LoRASaver:
         # How far the stored weight moved along the LoRA update, against the update itself. Summed
         # over layers, overlap[0] / overlap[1] is the share of the update the baked model applies:
         # whatever falls under half a step of the stored dtype or of the quantization grid rounds
-        # away. A rank-256 distillation LoRA kept 61% of itself on bfloat16 weights.
+        # away. The rank-256 viggle_turbo LoRA for Qwen-Image-2.1 kept 66% of itself on bfloat16 weights.
         delta = sum(LoRASaver._lora_delta(adapter, dtype=mx.float32) for adapter in adapters)
         moved = after.astype(mx.float32) - before.astype(mx.float32)
         along, length = mx.sum(moved * delta), mx.sum(delta * delta)
