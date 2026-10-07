@@ -36,6 +36,31 @@ def test_bake_reports_the_share_of_the_update_the_weights_hold(dtype, size, low,
     assert low < kept[0] < high
 
 
+@pytest.mark.parametrize(
+    ("bits", "stored", "size", "low", "high"),
+    [
+        # Folded onto the decoded q8 grid, then the same from the dense weights -q quantized.
+        (8, False, 0.1, 0.9, 1.1),
+        (8, False, 1e-3, 0.0, 0.5),
+        (8, True, 0.1, 0.9, 1.1),
+        # A q4 layer is re-quantized at q8, so a large update survives it.
+        (4, False, 0.1, 0.9, 1.1),
+    ],
+)
+def test_bake_reports_the_share_on_quantized_layers(bits, stored, size, low, high):
+    block = _Block(mx.bfloat16, size)
+    weight = block.proj.linear.weight
+    block.proj.linear = block.proj.linear.to_quantized(group_size=64, bits=bits)
+    kept = []
+
+    dense = {"proj": {"weight": weight}} if stored else None
+    LoRASaver.bake_and_strip_lora(block, dense_weights=dense, kept=kept)
+
+    assert isinstance(block.proj, nn.QuantizedLinear)
+    assert len(kept) == 1
+    assert low < kept[0] < high
+
+
 @pytest.mark.parametrize(("size", "warned"), [(1e-3, True), (0.1, False)])
 def test_loader_says_how_to_keep_an_update_the_bake_rounds_away(monkeypatch, capsys, size, warned):
     # The viggle_turbo LoRA for Qwen-Image-2.1 kept 66% of itself baked into bfloat16 (#835).
