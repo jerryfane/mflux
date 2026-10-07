@@ -27,7 +27,7 @@ class LoRASaver:
             base = layer.base_linear if fused else layer.linear
             adapters = layer.loras if fused else [layer]
             measured = kept is not None and all(isinstance(adapter, LoRALinear) for adapter in adapters)
-            before = dense_weight(base) if measured else None
+            before = dense_weight(base, dtype=mx.float32) if measured else None
             source = LoRASaver._stored_weight(dense_weights, path) if dense_weights is not None else None
             folded = LoRASaver._fold_before_quantizing(base, adapters, source, path=path)
             if folded is None:
@@ -41,7 +41,7 @@ class LoRASaver:
                     elif isinstance(adapter, LoKrLinear):
                         folded = LoRASaver._bake_lokr_into_linear(folded, adapter, path=path, upgraded=upgraded)
             if measured:
-                LoRASaver._add_overlap(overlap, before, dense_weight(folded), adapters)
+                LoRASaver._add_overlap(overlap, before, dense_weight(folded, dtype=mx.float32), adapters)
             return folded
 
         # The walk gets bake as an argument. A walker that closes over itself is a reference cycle
