@@ -22,8 +22,8 @@ def dense_weight(linear, dtype: mx.Dtype | None = None) -> mx.array:
     Adapter deltas are computed against, and folded into, the actual weight values, so
     quantized and fp8 bases have to be decoded first. DoRA in particular is a non-linear
     function of the base weight, and would otherwise take a norm over packed codes.
-    dtype, when given, is the precision a quantized weight is decoded in; by default it is
-    that of its scales.
+    dtype, when given, is the precision a quantized weight is decoded in; by default MLX
+    infers it from the scales and biases.
     """
     if isinstance(linear, nn.QuantizedLinear):
         return mx.dequantize(
