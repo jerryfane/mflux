@@ -110,8 +110,11 @@ The notes below describe `uv run mflux-generate-qwen-2.1`. The reference-editing
   Direct Transformer calls and training remain unpacked. For custom inference loops,
   `with model.transformer.inference_projections():` creates a read-only weight snapshot;
   leave the scope before changing parameters, adapters, precision, or differentiating.
-  Automatic generation scopes clean up even on errors. Larger GEMMs retain the weight
-  values and dtypes but may change floating-point accumulation and resulting pixels.
+  Automatic generation scopes release packed references, text caches, and compiled steps
+  even on errors. Compiled steps are reset even when packing is disabled or every group
+  is ineligible: MLX traces capture unpacked weights and adapter state as constants too,
+  so retaining them would ignore between-generation updates. Larger GEMMs retain the
+  weight values and dtypes but may change floating-point accumulation and resulting pixels.
 - Q/K norm+rope runs as one fused custom Metal kernel when available (`head_dim` a multiple
   of 64 and matching rope tables); `MFLUX_QWEN21_DISABLE_FUSED_PROLOGUE=1` disables it.
 - Step reuse (TeaCache-style, shared across models via `StepCache`): `--step-cache-ratio 0.25`

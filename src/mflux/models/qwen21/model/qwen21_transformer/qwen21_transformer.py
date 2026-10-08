@@ -147,6 +147,8 @@ class Qwen21Transformer(nn.Module):
         for block in self.transformer_blocks:
             block.attn._qkv_weight = None
             block.img_mlp._gate_proj_weight = None
+        # Unpacked traces capture weights and adapter state too; retaining them would
+        # ignore between-generation updates even when no projection group was packed.
         self._step_fn = None
         self._image_step_fn = None
         self.clear_text_cache()

@@ -36,7 +36,14 @@ class TestQwen21PackedProjections:
         original.use_text_cache = packed.use_text_cache = text_cache
         inputs = self._inputs(dtype)
         expected = self._generate(original, inputs)
-        actual = self._generate(packed, inputs)
+        with packed.inference_projections():
+            for block in packed.transformer_blocks:
+                assert block.attn._qkv_weight is not None
+                assert block.img_mlp._gate_proj_weight is not None
+            actual = [self._step(packed, inputs, timestep) for timestep in (1, 2)]
+        for block in packed.transformer_blocks:
+            assert block.attn._qkv_weight is None
+            assert block.img_mlp._gate_proj_weight is None
         tolerance = 2e-2 if dtype == mx.bfloat16 else 2e-5
         for result, reference in zip(actual, expected):
             self._assert_close(result, reference, tolerance)
@@ -58,6 +65,37 @@ class TestQwen21PackedProjections:
             block.img_mlp.gate_layer.weight[:] = 0.5 * block.img_mlp.gate_layer.weight + 0.1
         expected = self._generate(original, inputs)[-1]
         actual = self._generate(packed, inputs)[-1]
+        self._assert_close(actual, expected)
+        assert not np.allclose(self._numpy(actual), self._numpy(before), atol=1e-5, rtol=1e-5)
+
+    @pytest.mark.parametrize("fallback", ["disabled", "adapters"])
+    @pytest.mark.parametrize("text_cache", [False, True])
+    @pytest.mark.parametrize("interrupted", [False, True])
+    def test_unpacked_generation_retraces_after_parameter_updates(self, fallback, text_cache, interrupted):
+        original, reused = self._model(packed=False), self._model(packed=fallback != "disabled")
+        for model in (original, reused):
+            model.use_text_cache = text_cache
+            if fallback == "adapters":
+                for block in model.transformer_blocks:
+                    block.attn.to_v = self._adapter(block.attn.to_v)
+                    block.img_mlp.gate_layer = self._adapter(block.img_mlp.gate_layer)
+        inputs = self._inputs()
+        with suppress(InterruptedError), reused.inference_projections():
+            for block in reused.transformer_blocks:
+                assert block.attn._qkv_weight is None
+                assert block.img_mlp._gate_proj_weight is None
+            before = self._step(reused, inputs, 2)
+            if interrupted:
+                raise InterruptedError
+        for model in (original, reused):
+            model.proj_out.weight[:] = -0.5 * model.proj_out.weight
+            if fallback == "adapters":
+                for block in model.transformer_blocks:
+                    block.attn.to_v.scale = 2.0
+                    block.img_mlp.gate_layer.scale = 2.0
+        actual = self._generate(reused, inputs)[-1]
+        # The reference has never been traced with the previous parameter values.
+        expected = self._generate(original, inputs)[-1]
         self._assert_close(actual, expected)
         assert not np.allclose(self._numpy(actual), self._numpy(before), atol=1e-5, rtol=1e-5)
 
