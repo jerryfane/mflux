@@ -3,6 +3,7 @@ import pytest
 
 from mflux.models.common.config import ModelConfig
 from mflux.models.common.config.config import Config
+from mflux.models.qwen21.model.qwen21_transformer import qwen21_fused_kernels
 from mflux.models.qwen21.model.qwen21_transformer.qwen21_attention import Qwen21Attention
 from mflux.models.qwen21.model.qwen21_transformer.qwen21_fused_kernels import (
     fused_qk_norm_rope,
@@ -39,6 +40,49 @@ class TestFusedQkNormRopeKernel:
         cos = (angles % 7 - 3).astype(mx.float32) / 4
         sin = (angles % 5 - 2).astype(mx.float32) / 4
         self._assert_native_parity(q, k, wq, wk, cos, sin, heads, head_dim)
+
+    @pytest.mark.parametrize("seed", [0, 42])
+    @pytest.mark.parametrize("head_dim", [64, 128, 256, 512])
+    @pytest.mark.parametrize(
+        ("dtype", "max_abs_error"), [(mx.bfloat16, 1 / 64), (mx.float16, 0.002), (mx.float32, 1e-5)]
+    )
+    @pytest.mark.parametrize("view", ["contiguous", "packed", "transposed"])
+    def test_seeded_random_native_parity(self, seed, head_dim, dtype, max_abs_error, view):
+        self._require_kernel(head_dim)
+        mx.random.seed(seed)
+        batch, length, heads = 2, 257, 3
+        width = heads * head_dim
+        if view == "packed":
+            packed = mx.random.normal((batch, 2 * length, 6 * width)).astype(dtype)
+            q = packed[:, 1::2, 1 : 2 * width : 2]
+            k = packed[:, 1::2, 2 * width + 1 : 4 * width : 2]
+        else:
+            q = mx.random.normal((batch, length, width)).astype(dtype)
+            k = mx.random.normal((batch, length, width)).astype(dtype)
+            if view == "transposed":
+                q = mx.contiguous(q.transpose(0, 2, 1)).transpose(0, 2, 1)
+                k = mx.contiguous(k.transpose(2, 1, 0)).transpose(2, 1, 0)
+        wq = mx.random.uniform(0.5, 1.5, (2 * head_dim,)).astype(dtype)[1::2]
+        wk = mx.random.uniform(0.5, 1.5, (2 * head_dim,)).astype(dtype)[::2]
+        angles = mx.random.uniform(-mx.pi, mx.pi, (head_dim, 2 * length))
+        cos = mx.cos(angles).T[1::2, 1::2]
+        sin = mx.sin(angles).T[1::2, 1::2]
+        actual = fused_qk_norm_rope(q, k, wq, wk, cos, sin, heads, head_dim)
+        assert actual is not None
+        expected = [
+            Qwen21Attention._apply_rope(
+                mx.fast.rms_norm(x.reshape(batch, length, heads, head_dim), w, 1e-6), cos, sin
+            ).transpose(0, 2, 1, 3)
+            for x, w in ((q, wq), (k, wk))
+        ]
+        mx.eval(actual, expected)
+        for result, reference in zip(actual, expected, strict=True):
+            assert result.shape == reference.shape
+            assert result.dtype == reference.dtype
+            error = mx.max(mx.abs(result.astype(mx.float32) - reference.astype(mx.float32))).item()
+            differing_fraction = mx.mean((result != reference).astype(mx.float32)).item()
+            assert error <= max_abs_error, (error, differing_fraction)
+            assert differing_fraction < 1e-3, (error, differing_fraction)
 
     @pytest.mark.parametrize("head_dim", [64, 128])
     @pytest.mark.parametrize("view", ["packed", "transposed", "broadcast"])
@@ -119,6 +163,46 @@ class TestFusedQkNormRopeKernel:
         cos, sin = mx.ones((3, 32)), mx.zeros((3, 32))
         assert not fused_qk_norm_rope_available(64)
         assert fused_qk_norm_rope(q, q, w, w, cos, sin, 2, 64) is None
+
+    @pytest.mark.parametrize("error_type", [RuntimeError, ValueError])
+    def test_kernel_creation_failure_preserves_composed_attention(self, monkeypatch, error_type):
+        if not mx.metal.is_available() or mx.default_device() != mx.gpu:
+            pytest.skip("Kernel construction requires the Metal device")
+        monkeypatch.delenv("MFLUX_QWEN21_DISABLE_FUSED_PROLOGUE", raising=False)
+        monkeypatch.setattr(qwen21_fused_kernels, "_fused_qk_norm_rope_kernel", None)
+        monkeypatch.setattr(qwen21_fused_kernels, "_fused_qk_norm_rope_unavailable", False)
+        attempts = 0
+
+        def unavailable_kernel(**kwargs):
+            nonlocal attempts
+            attempts += 1
+            raise error_type("Metal kernel construction is unsupported")
+
+        monkeypatch.setattr(mx.fast, "metal_kernel", unavailable_kernel)
+        mx.random.seed(42)
+        hidden_states = mx.random.normal((2, 7, 128))
+        angles = mx.random.normal((7, 32))
+        cos, sin = mx.cos(angles), mx.sin(angles)
+        for _ in range(2):
+            attention = Qwen21Attention(dim=128, num_heads=2, head_dim=64)
+            actual = attention(hidden_states, cos, sin, attn_mask=None)
+            precision = attention.compute_precision
+            hidden = precision.to_compute(hidden_states)
+            q = attention.to_q(hidden).reshape(2, 7, 2, 64)
+            k = attention.to_k(hidden).reshape(2, 7, 2, 64)
+            v = attention.to_v(hidden).reshape(2, 7, 2, 64).transpose(0, 2, 1, 3)
+            q = Qwen21Attention._apply_rope(mx.fast.rms_norm(q, attention.norm_q.weight, 1e-6), cos, sin)
+            k = Qwen21Attention._apply_rope(mx.fast.rms_norm(k, attention.norm_k.weight, 1e-6), cos, sin)
+            attended = mx.fast.scaled_dot_product_attention(
+                q.transpose(0, 2, 1, 3), k.transpose(0, 2, 1, 3), v, scale=64**-0.5
+            )
+            expected = attention.to_out[0](attended.transpose(0, 2, 1, 3).reshape(2, 7, 128))
+            expected = precision.to_stream(expected, hidden_states.dtype)
+            mx.eval(actual, expected)
+            assert mx.array_equal(actual, expected)
+            assert not attention.use_fused_prologue
+        assert fused_qk_norm_rope(hidden_states, hidden_states, mx.ones((64,)), mx.ones((64,)), cos, sin, 2, 64) is None
+        assert attempts == 1
 
     @pytest.mark.parametrize("eps", [1e-5, 1e-3])
     @pytest.mark.parametrize("mutate_norm", [False, True])

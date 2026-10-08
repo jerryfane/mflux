@@ -15,7 +15,8 @@ import mlx.core as mx
 
 _FUSED_QK_NORM_ROPE_SOURCE = """
     constexpr float eps = 1e-6;
-    constexpr uint pairs_per_lane = D / 64;
+    constexpr uint blocks = (D + 127) / 128;
+    constexpr uint pairs_per_lane = 2 * blocks;
     uint row = thread_position_in_grid.x / 32;
     if (row >= B * L * H) return;
     uint lane = thread_index_in_simdgroup;
@@ -25,22 +26,36 @@ _FUSED_QK_NORM_ROPE_SOURCE = """
     size_t qb = b * q_strides[0] + l * q_strides[1] + h * D * q_strides[2];
     size_t kb = b * k_strides[0] + l * k_strides[1] + h * D * k_strides[2];
 
-    float qv[D / 32], kv[D / 32];
+    float qv[4 * blocks], kv[4 * blocks];
     float sq = 0.0f, sk = 0.0f;
-    for (uint j = 0; j < D / 32; ++j) {
-        uint c = lane * (D / 32) + j;
-        qv[j] = float(TQ(q[qb + c * q_strides[2]]));
-        kv[j] = float(TK(k[kb + c * k_strides[2]]));
-        sq += qv[j] * qv[j];
-        sk += kv[j] * kv[j];
+    // Match native RMSNorm: four adjacent values per lane, then subgroup totals.
+    for (uint block = 0; block < blocks; ++block) {
+        float bq = 0.0f, bk = 0.0f;
+        for (uint j = 0; j < 4; ++j) {
+            uint c = block * 128 + lane * 4 + j;
+            uint i = block * 4 + j;
+            qv[i] = c < D ? float(TQ(q[qb + c * q_strides[2]])) : 0.0f;
+            kv[i] = c < D ? float(TK(k[kb + c * k_strides[2]])) : 0.0f;
+            bq += qv[i] * qv[i];
+            bk += kv[i] * kv[i];
+        }
+        bq = simd_sum(bq);
+        bk = simd_sum(bk);
+        if (blocks == 1 || lane == block) {
+            sq = bq;
+            sk = bk;
+        }
     }
-    float rrq = metal::precise::rsqrt(simd_sum(sq) / float(D) + eps);
-    float rrk = metal::precise::rsqrt(simd_sum(sk) / float(D) + eps);
+    float rrq = metal::precise::rsqrt((blocks == 1 ? sq : simd_sum(sq)) / float(D) + eps);
+    float rrk = metal::precise::rsqrt((blocks == 1 ? sk : simd_sum(sk)) / float(D) + eps);
     size_t out = ((size_t(b) * H + h) * L + l) * D;
 
     for (uint pair = 0; pair < pairs_per_lane; ++pair) {
-        uint p = lane * pairs_per_lane + pair;
-        uint c = 2 * p;
+        #pragma STDC FP_CONTRACT OFF
+        // Composed RoPE rounds the products before its separate add/subtract.
+        uint c = (pair / 2) * 128 + lane * 4 + (pair % 2) * 2;
+        if (c >= D) continue;
+        uint p = c / 2;
         // MLX RMSNorm promotes x/weight together, rounds normalized x, then
         // rounds the weighted result before the FP32 rotary arithmetic.
         float nqa = float(TQ(float(TQ(qv[2 * pair] * rrq)) * float(TQ(wq[c * wq_strides[0]]))));
@@ -57,21 +72,27 @@ _FUSED_QK_NORM_ROPE_SOURCE = """
 """
 
 _fused_qk_norm_rope_kernel = None
+_fused_qk_norm_rope_unavailable = False
 
 
 def _get_kernel():
-    global _fused_qk_norm_rope_kernel
-    if not mx.metal.is_available() or mx.default_device() != mx.gpu:
+    global _fused_qk_norm_rope_kernel, _fused_qk_norm_rope_unavailable
+    if _fused_qk_norm_rope_unavailable or not mx.metal.is_available() or mx.default_device() != mx.gpu:
         return None
     if _fused_qk_norm_rope_kernel is None:
-        _fused_qk_norm_rope_kernel = mx.fast.metal_kernel(
-            name="fused_qk_norm_rope",
-            input_names=["q", "k", "wq", "wk", "cos_t", "sin_t"],
-            output_names=["out_q", "out_k"],
-            source=_FUSED_QK_NORM_ROPE_SOURCE,
-            ensure_row_contiguous=False,
-            compile_options={"math_mode": "safe"},
-        )
+        try:
+            _fused_qk_norm_rope_kernel = mx.fast.metal_kernel(
+                name="fused_qk_norm_rope",
+                input_names=["q", "k", "wq", "wk", "cos_t", "sin_t"],
+                output_names=["out_q", "out_k"],
+                source=_FUSED_QK_NORM_ROPE_SOURCE,
+                ensure_row_contiguous=False,
+                compile_options={"math_mode": "safe"},
+            )
+        except (RuntimeError, ValueError):
+            # Cache unsupported construction, not failures while dispatching the kernel.
+            _fused_qk_norm_rope_unavailable = True
+            return None
     return _fused_qk_norm_rope_kernel
 
 

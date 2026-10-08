@@ -103,9 +103,13 @@ The notes below describe `uv run mflux-generate-qwen-2.1`. The reference-editing
 - Q/K norm+rope runs as one stride-aware custom Metal kernel and writes the
   attention-ready `[batch, heads, tokens, head_dim]` layout directly. It supports
   float32/float16/bfloat16 inputs and norm weights, preserving MLX RMSNorm's dtype
-  promotion and intermediate rounding before rotary embedding. The fused path
+  promotion, reduction grouping, and intermediate rounding before rotary embedding.
+  Rotary products are rounded separately before addition/subtraction, as in the
+  composed path. The fused path
   requires `head_dim` a multiple of 64 up to 512, matching rope tables, and norm
   epsilon `1e-6`; other configurations use the composed implementation.
+  If custom Metal kernel construction is unsupported, attention also uses the
+  composed path and does not retry construction for the rest of the process.
   `MFLUX_QWEN21_DISABLE_FUSED_PROLOGUE=1` also selects the composed path.
 - Step reuse (TeaCache-style, shared across models via `StepCache`): `--step-cache-ratio 0.25`
   (Python: `generate_image(..., step_cache_ratio=0.25)`) skips the transformer on the ~25% of
