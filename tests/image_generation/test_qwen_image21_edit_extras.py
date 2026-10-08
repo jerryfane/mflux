@@ -1,6 +1,7 @@
 import json
 import sys
 from argparse import Namespace
+from contextlib import nullcontext
 from types import SimpleNamespace
 
 import mlx.core as mx
@@ -43,6 +44,9 @@ class _FakeTransformer:
     def __call__(self, hidden, text, timestep, layout, cache=None, step_cache=None):
         self.calls.append(float(timestep[0]))
         return mx.ones((1, layout.target_tokens, hidden.shape[-1]))
+
+    def inference_projections(self):
+        return nullcontext()
 
 
 class _FakeVAE:

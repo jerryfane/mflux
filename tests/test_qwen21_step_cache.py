@@ -1,4 +1,5 @@
 import sys
+from contextlib import nullcontext
 from types import SimpleNamespace
 
 import mlx.core as mx
@@ -20,14 +21,13 @@ class _StubTransformer:
     def __init__(self):
         self.time_text_embed = Qwen21TimeTextEmbed(embedding_dim=64)
         self.called_steps: list[int] = []
-        self.cleared = False
 
     def __call__(self, t, config, hidden_states, encoder_hidden_states, encoder_hidden_states_mask):
         self.called_steps.append(t)
         return mx.zeros_like(hidden_states)
 
-    def clear_text_cache(self):
-        self.cleared = True
+    def inference_projections(self):
+        return nullcontext()
 
 
 def _stub_model() -> QwenImage21:
@@ -77,7 +77,6 @@ class TestQwen21StepCacheWiring:
             seed=1, prompt="a cat", num_inference_steps=40, height=128, width=128, step_cache_ratio=0.25
         )
         assert len(model.transformer.called_steps) == 30  # 40 steps, 10 reused
-        assert model.transformer.cleared
         assert no_decode["generation_parameters"] == {"step_cache_ratio": 0.25}
 
     def test_default_run_calls_the_transformer_every_step(self, no_decode):
