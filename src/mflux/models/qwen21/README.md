@@ -100,23 +100,17 @@ The notes below describe `uv run mflux-generate-qwen-2.1`. The reference-editing
   embeddings (the positive and negative CFG prompts); padded prompts recompute the joint
   sequence. Set `use_text_cache = False` on the transformer to force the recompute path.
   The reference-editing command (`uv run mflux-generate-qwen-2.1-edit`) keeps its own prefix cache.
-- Dense Q/K/V and SwiGLU gate/projection weights are packed once per generation in
-  both commands, after prompt encoding and before denoising. Original checkpoint keys
-  remain unchanged; the named weights share the packed buffers instead of retaining
-  a second full copy. Packing temporarily holds a group's source and destination
-  buffers together and resets compiled steps, so short runs may not benefit.
-  Quantized, adapter-bearing, biased, or mixed-dtype groups keep their original math.
-  Set `model.transformer.use_packed_projections = False` to compare without packing.
-  Direct Transformer calls and training remain unpacked. For custom inference loops,
-  `with model.transformer.inference_projections():` creates a read-only weight snapshot;
-  leave the scope before changing parameters, adapters, precision, or differentiating.
-  Automatic generation scopes release packed references, text caches, and compiled steps
-  even on errors. Compiled steps are reset even when packing is disabled or every group
-  is ineligible: MLX traces capture unpacked weights and adapter state as constants too,
-  so retaining them would ignore between-generation updates. Larger GEMMs retain the
-  weight values and dtypes but may change floating-point accumulation and resulting pixels.
-- Q/K norm+rope runs as one fused custom Metal kernel when available (`head_dim` a multiple
-  of 64 and matching rope tables); `MFLUX_QWEN21_DISABLE_FUSED_PROLOGUE=1` disables it.
+- Q/K norm+rope runs as one stride-aware custom Metal kernel and writes the
+  attention-ready `[batch, heads, tokens, head_dim]` layout directly. It supports
+  float32/float16/bfloat16 inputs and norm weights, preserving MLX RMSNorm's dtype
+  promotion, reduction grouping, and intermediate rounding before rotary embedding.
+  Rotary products are rounded separately before addition/subtraction, as in the
+  composed path. The fused path
+  requires `head_dim` a multiple of 64 up to 512, matching rope tables, and norm
+  epsilon `1e-6`; other configurations use the composed implementation.
+  If custom Metal kernel construction is unsupported, attention also uses the
+  composed path and does not retry construction for the rest of the process.
+  `MFLUX_QWEN21_DISABLE_FUSED_PROLOGUE=1` also selects the composed path.
 - Step reuse (TeaCache-style, shared across models via `StepCache`): `--step-cache-ratio 0.25`
   (Python: `generate_image(..., step_cache_ratio=0.25)`) skips the transformer on the ~25% of
   denoise steps whose timestep-embedding signal changes least (first/last 10% of the run are
