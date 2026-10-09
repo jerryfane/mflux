@@ -123,7 +123,6 @@ class Qwen21Attention(nn.Module):
         """Shared Q/K/V projection: returns [batch, heads, seq, head_dim]."""
         query, key, value = self._project_qkv(hidden_states)
         if self.use_fused_prologue and self.norm_q.eps == self.norm_k.eps == 1e-6:
-
             fused = fused_qk_norm_rope(
                 query,
                 key,
