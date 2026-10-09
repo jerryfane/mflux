@@ -579,7 +579,7 @@ def test_step_cache_leaves_a_short_run_alone(tmp_path, steps, strength, skips):
         caches.append(step_cache)
         return mx.ones((1, layout.target_tokens, hidden.shape[-1]))
 
-    model.transformer = type("_Transformer", (), {"axes": _FakeTransformer.axes, "__call__": staticmethod(record)})()
+    model.transformer = type("_Transformer", (_FakeTransformer,), {"__call__": staticmethod(record)})()
     image = model.generate_image(
         seed=1,
         prompt="edit",
